@@ -51,6 +51,7 @@ extern "C" {
 #include "muse_state.h"
 }
 #endif
+#include "buzzer.h"
 }
 
 #include <xplat/noise/core/ClientSession.h>
@@ -1395,6 +1396,9 @@ static char *build_register_json(void) {
                 "voltage, and whether it is charging or on USB power; each is "
                 "null when the device has no battery or can't measure it",
                 nullptr, nullptr);
+    add_command(commands, "custom.buzzer",
+                "Activate the buzzer for 200 milliseconds",
+                nullptr, nullptr);
 #if CONFIG_HOMEHUB_TUNNEL
     add_command(commands, "device.discover",
                 "Scan local network for devices (ARP, mDNS, SSDP, SNMP, NetBIOS)",
@@ -1780,6 +1784,13 @@ static void handle_invoke_request(
         }
     } else if (strcmp(command, "device.health") == 0) {
         send_device_health(session_generation, request_id);
+    } else if (strcmp(command, "custom.buzzer") == 0) {
+        activate_buzzer();
+
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        // Optionally add any result data if needed
+        queue_result(session_generation, request_id, result);
     } else if (s_command_cb) {
         cJSON *result = s_command_cb(command, cmd_params, request_id,
                                      session_generation);

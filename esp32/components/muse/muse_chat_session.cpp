@@ -70,6 +70,7 @@ extern "C" {
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_wifi.h"
+#include "wit_tts.h"
 }
 #include "muse_chat_priv.h"
 
@@ -1507,15 +1508,19 @@ static void on_chat_ack(stream_t *s)
 }
 
 /* ---- Turn: speech ---- */
+void tts_data(const uint8_t *data, size_t len);
 
 static void start_tts(void)
 {
-    if (s_turn.tts_msg >= 0) {
+    if (s_turn.tts_msg >= 0)
+    {
         return;
     }
-    for (int i = 0; i < s_turn.nmsgs; i++) {
+    for (int i = 0; i < s_turn.nmsgs; i++)
+    {
         msg_t &m = s_turn.msgs[i];
-        if (m.tts != TTS_QUEUED) {
+        if (m.tts != TTS_QUEUED)
+        {
             continue;
         }
         /*
@@ -1533,20 +1538,54 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
-        m.pcm_start = s_turn.pcm_out;
-        m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
-        m.tts = TTS_ACTIVE;
-        s_turn.tts_msg = i;
-        s_turn.silent = true;
-        ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
-        show_reply_start(m);
-        return;
+
+        // --- CUSTOM TTS INTEGRATION ---
+        // Grab the text for this specific message using the SDK's pointer math
+        char *msg_text = s_turn.texts + (i * TEXT_MAX);
+
+        if (msg_text && strlen(msg_text) > 0)
+        {
+            ESP_LOGI(TAG, "Triggering Wit.ai TTS for message %d: %s", i, msg_text);
+
+            // Update state so the UI and session track the active turn correctly
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0; // (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.silent = false;
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+
+            play_wit_tts_audio(msg_text, tts_data);
+
+            ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+
+            // Spawn your background task to fetch from Wit.ai and stream to I2S TX
+            // xTaskCreate(
+            //     wit_tts_task,
+            //     "wit_tts_task",
+            //     8192, // 8KB stack for TLS/HTTP client
+            //     (void *)strdup(msg_text),
+            //     5,
+            //     NULL);
+            return;
+        }
+        // ------------------------------
     }
 }
 
-static void tts_data(const uint8_t *data, size_t len)
+void tts_data(const uint8_t *data, size_t len)
 {
-    if (s_turn.mp3_len + len > MP3_BUF) {
+    if (len == 0)
+    {
+        s_turn.mp3_ended = true;
+    }
+    if (s_turn.mp3_len + len > MP3_BUF)
+    {
         ESP_LOGW(TAG, "MP3 buffer full, dropping %u bytes", (unsigned)len);
         len = MP3_BUF - s_turn.mp3_len;
     }

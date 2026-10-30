@@ -289,9 +289,23 @@ static bool led_hw_init(void) {
 #elif CONFIG_HOMEHUB_LED_BACKEND_DEVKIT_GPIO27
 static led_strip_handle_t s_strip = NULL;
 
-static void led_hw_set_color(rgb_t c) {
-    if (!s_strip) return;
-    if (led_strip_set_pixel(s_strip, 0, c.r, c.g, c.b) != ESP_OK) return;
+static void led_hw_set_color(rgb_t c)
+{
+    if (!s_strip)
+        return;
+
+    // 1. Define your global brightness scale (0.0 to 1.0)
+    // 0.1f = 10% brightness (highly recommended for blinding desk LEDs)
+    const float BRIGHTNESS_SCALE = 0.05f;
+
+    // 2. Scale each color channel mathematically
+    uint8_t scaled_r = (uint8_t)(c.r * BRIGHTNESS_SCALE);
+    uint8_t scaled_g = (uint8_t)(c.g * BRIGHTNESS_SCALE);
+    uint8_t scaled_b = (uint8_t)(c.b * BRIGHTNESS_SCALE);
+
+    // 3. Pass the dimmed values to the physical strip
+    if (led_strip_set_pixel(s_strip, 0, scaled_r, scaled_g, scaled_b) != ESP_OK)
+        return;
     (void)led_strip_refresh(s_strip);
 }
 
