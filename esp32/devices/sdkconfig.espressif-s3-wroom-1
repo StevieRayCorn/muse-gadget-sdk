@@ -20,6 +20,8 @@
 # Source: Espressif's ESP32-S3-DevKitC-1 v1.1 user guide and IDF's blink
 # example (sdkconfig.defaults.esp32s3).
 CONFIG_IDF_TARGET="esp32s3"
+CONFIG_MUSE_DEVICE_MODEL_ID="muse-gadget-espressif-s3-wroom-1"
+CONFIG_MUSE_DEVICE_MODEL_NAME="Espressif ESP32-S3-WROOM-1"
 CONFIG_MUSE_BOARD_ESPRESSIF_S3_WROOM_1=y
 # CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 # CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_8mb.csv"
