@@ -58,6 +58,12 @@ static void turn_fail(const char *) { turn_finish(); }
 static bool ensure_connected() { return true; }
 bool muse_hatch_configured() { return true; }
 static void resampler_init(resampler_t *, int, int) {}
+/* FreeRTOS semaphore stubs: turn_start() takes the MP3 mutex. */
+#define portMAX_DELAY (0xffffffffUL)
+typedef void *SemaphoreHandle_t;
+static SemaphoreHandle_t s_mp3_mutex;
+static int xSemaphoreTake(SemaphoreHandle_t, unsigned long) { return 1; }
+static void xSemaphoreGive(SemaphoreHandle_t) {}
 ''' + reset + handlers + r'''
 static void begin(bool typed = false) {
     assert(turn_start(s_turn.gen + 1, typed));

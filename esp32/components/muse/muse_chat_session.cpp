@@ -59,6 +59,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -257,6 +258,15 @@ struct turn_t {
 /* 10 KB, most of it the MP3 decoder: in PSRAM on boards that let static data go
  * there (the AIPI), so Wi-Fi setup and TLS have the internal RAM. */
 EXT_RAM_BSS_ATTR static turn_t s_turn;
+
+/* Guards the MP3 buffer state the Wit.ai fetch task shares with this task:
+ * s_turn.mp3, mp3_len and mp3_ended, plus the gen/tts_msg reads the fetch
+ * callback uses to drop stale audio. Every change to them takes it, so the
+ * fetch task's appends can't interleave with decode()'s drain or a turn
+ * reset. Created in muse_hatch_start() before hatch_task starts.
+ * poll_socket()'s mp3_len read stays unlocked on purpose: a size_t read is
+ * atomic, and the value only paces socket reads. */
+static SemaphoreHandle_t s_mp3_mutex;
 
 /* Turn milestones, logged together when the turn ends. */
 enum mark_t : uint8_t { M_RELEASE, M_SENT, M_ACK, M_TEXT, M_DONE, M_TTS, M_MP3, M_AUDIO, M_COUNT };
@@ -964,9 +974,11 @@ static void turn_finish(void)
     turn_reset_streams();
     s_turn.phase = P_IDLE;
     s_turn.dict_id = s_turn.chat_id = 0;
+    xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
     s_turn.tts_msg = -1;
     s_turn.silent = false;
     s_turn.mp3_len = 0;
+    xSemaphoreGive(s_mp3_mutex);
 }
 
 static void turn_fail(const char *why)
@@ -1002,6 +1014,7 @@ static bool turn_start(uint32_t gen, bool text)
     }
     uint8_t *chunk = s_turn.chunk, *mp3 = s_turn.mp3, *note = s_turn.note;
     char *texts = s_turn.texts;
+    xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
     s_turn = turn_t{};
     s_turn.chunk = chunk;
     s_turn.mp3 = mp3;
@@ -1010,6 +1023,7 @@ static bool turn_start(uint32_t gen, bool text)
     s_turn.gen = gen;
     s_turn.text = text;
     s_turn.tts_msg = -1;
+    xSemaphoreGive(s_mp3_mutex);
     memset(s_marks, 0, sizeof(s_marks));
     s_reply_shown[0] = '\0';
     s_turn.start_us = now_us();
@@ -1509,6 +1523,39 @@ static void on_chat_ack(stream_t *s)
 
 /* ---- Turn: speech ---- */
 void tts_data(const uint8_t *data, size_t len);
+static void tts_data_locked(const uint8_t *data, size_t len);
+
+/*
+ * The Wit.ai fetch runs on its own task so decode() (this task) can play the
+ * first chunks while the rest is still downloading. Before, start_tts()
+ * fetched the whole MP3 inline, and decode() couldn't run until it returned.
+ * The arg carries the turn generation and message index so a fetch from an
+ * interrupted turn can't feed the next turn's buffer.
+ */
+struct wit_fetch_arg_t {
+    char *text;
+    uint32_t gen;
+    int msg;
+};
+
+static void wit_tts_data_cb(void *ctx, const uint8_t *data, size_t len)
+{
+    wit_fetch_arg_t *arg = static_cast<wit_fetch_arg_t *>(ctx);
+    xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
+    if (arg->gen == s_turn.gen && arg->msg == s_turn.tts_msg) {
+        tts_data_locked(data, len);
+    } /* else the turn moved on: drop the stale audio */
+    xSemaphoreGive(s_mp3_mutex);
+}
+
+static void wit_tts_task(void *arg)
+{
+    wit_fetch_arg_t *fetch = static_cast<wit_fetch_arg_t *>(arg);
+    play_wit_tts_audio(fetch->text, wit_tts_data_cb, fetch);
+    free(fetch->text);
+    free(fetch);
+    vTaskDelete(nullptr);
+}
 
 static void start_tts(void)
 {
@@ -1553,36 +1600,59 @@ static void start_tts(void)
             m.tts = TTS_ACTIVE;
             s_turn.tts_msg = i;
             s_turn.silent = false;
+            xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
             s_turn.mp3_len = 0;
             s_turn.mp3_ended = false;
+            xSemaphoreGive(s_mp3_mutex);
             s_turn.kbps = 0;
             s_turn.down_rate = 0;
             mp3dec_init(&s_turn.dec);
 
-            play_wit_tts_audio(msg_text, tts_data);
+            // Fetch on a background task: decode() plays the first chunks
+            // while the rest is still downloading. The task owns the copy
+            // of the text (msg_text points into the turn's buffer, which a
+            // new turn can reset) and frees it when the fetch is done.
+            wit_fetch_arg_t *fetch = static_cast<wit_fetch_arg_t *>(malloc(sizeof(wit_fetch_arg_t)));
+            char *text_copy = fetch ? strdup(msg_text) : nullptr;
+            if (!fetch || !text_copy) {
+                ESP_LOGE(TAG, "Wit.ai TTS: out of memory");
+                free(text_copy);
+                free(fetch);
+                /* No fetch task: end the message instead of leaving it hanging. */
+                xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
+                s_turn.mp3_ended = true;
+                xSemaphoreGive(s_mp3_mutex);
+            } else {
+                fetch->text = text_copy;
+                fetch->gen = s_turn.gen;
+                fetch->msg = i;
+                if (xTaskCreate(wit_tts_task, "wit_tts_task", 8192, fetch, 5, nullptr) != pdPASS) {
+                    ESP_LOGE(TAG, "Wit.ai TTS task failed to start");
+                    free(text_copy);
+                    free(fetch);
+                    xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
+                    s_turn.mp3_ended = true;
+                    xSemaphoreGive(s_mp3_mutex);
+                }
+            }
 
             ESP_LOGI(TAG, "showing message %s (%u chars)", m.id, (unsigned)m.len);
             show_reply_start(m);
 
-            // Spawn your background task to fetch from Wit.ai and stream to I2S TX
-            // xTaskCreate(
-            //     wit_tts_task,
-            //     "wit_tts_task",
-            //     8192, // 8KB stack for TLS/HTTP client
-            //     (void *)strdup(msg_text),
-            //     5,
-            //     NULL);
             return;
         }
         // ------------------------------
     }
 }
 
-void tts_data(const uint8_t *data, size_t len)
+/* Appends MP3 bytes to the turn's buffer. Called with s_mp3_mutex held.
+ * len == 0 is the fetch's end-of-stream signal (data is NULL then). */
+static void tts_data_locked(const uint8_t *data, size_t len)
 {
     if (len == 0)
     {
         s_turn.mp3_ended = true;
+        return;
     }
     if (s_turn.mp3_len + len > MP3_BUF)
     {
@@ -1592,6 +1662,13 @@ void tts_data(const uint8_t *data, size_t len)
     mark(M_MP3);
     memcpy(s_turn.mp3 + s_turn.mp3_len, data, len);
     s_turn.mp3_len += len;
+}
+
+void tts_data(const uint8_t *data, size_t len)
+{
+    xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
+    tts_data_locked(data, len);
+    xSemaphoreGive(s_mp3_mutex);
 }
 
 static void tts_end(stream_t *s, bool ok)
@@ -1637,6 +1714,11 @@ static void decode(void)
         pace_silently();
         return;
     }
+    /* The Wit.ai fetch task appends to the MP3 buffer while this drains it:
+     * hold the mutex across the decode and the compaction so a chunk can't
+     * land mid-memmove. The loop is bounded by the reply buffer's room, so
+     * the fetch task only ever waits a few milliseconds. */
+    xSemaphoreTake(s_mp3_mutex, portMAX_DELAY);
     /*
      * minimp3 only takes a frame once it can see the next one's header. Given
      * less, it resets and says to skip all of it, which drops speech and clicks.
@@ -1691,6 +1773,7 @@ static void decode(void)
         m.tts = TTS_FINISHED;
         s_turn.tts_msg = -1;
     }
+    xSemaphoreGive(s_mp3_mutex);
 }
 
 /* Ends the turn once the reply is complete and spoken, or on timeouts. */
@@ -2108,8 +2191,9 @@ extern "C" void muse_hatch_start(void)
         s.cap = NDJSON_LINE_MAX;
     }
     s_turn.tts_msg = -1;
+    s_mp3_mutex = xSemaphoreCreateMutex();
     /* Stack in PSRAM: TLS, Noise and the MP3 decoder (~16 KB of scratch) all run here. */
-    if (!s_cmds || !s_events || !s_in || !s_out || !s_turn.chunk || !s_turn.mp3 || (VOICE_NOTE && !s_turn.note) || !s_pcm || !s_pcm16 ||
+    if (!s_cmds || !s_events || !s_in || !s_out || !s_turn.chunk || !s_turn.mp3 || (VOICE_NOTE && !s_turn.note) || !s_pcm || !s_pcm16 || !s_mp3_mutex ||
         xTaskCreatePinnedToCoreWithCaps(hatch_task, "muse_chat", 48 * 1024, nullptr, 5, nullptr, 0,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "start failed");

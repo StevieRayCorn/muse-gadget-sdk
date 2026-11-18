@@ -7,8 +7,17 @@
 #define TAG "WIT_TTS"
 #define BUFFER 1024
 
-// Callback or function executed when the agent's text response is ready
-void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb)
+// Callback or function executed when the agent's text response is ready.
+// Signals the end of the stream (len == 0) exactly once, on every exit.
+static void wit_tts_end(wit_tts_cb on_wit_tts_cb, void *ctx)
+{
+    if (on_wit_tts_cb)
+    {
+        on_wit_tts_cb(ctx, NULL, 0);
+    }
+}
+
+void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
 {
     char url[128];
     snprintf(url, sizeof(url), "https://api.wit.ai/synthesize?v=20240304");
@@ -56,6 +65,7 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb)
     {
         ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
+        wit_tts_end(on_wit_tts_cb, ctx);
         return;
     }
 
@@ -65,6 +75,7 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb)
     {
         ESP_LOGE(TAG, "Failed to write POST data");
         esp_http_client_cleanup(client);
+        wit_tts_end(on_wit_tts_cb, ctx);
         return;
     }
 
@@ -80,22 +91,23 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb)
     while (1)
     {
         read_len = esp_http_client_read(client, read_buffer, sizeof(read_buffer));
-        if (on_wit_tts_cb)
-        {
-            on_wit_tts_cb((uint8_t *)read_buffer, read_len);
-        }
         if (read_len < 0)
         {
             ESP_LOGE(TAG, "Read failed from HTTP stream");
             break;
         }
-        else if (read_len == 0)
+        if (read_len == 0)
         {
             // End of stream
             break;
         }
+        if (on_wit_tts_cb)
+        {
+            on_wit_tts_cb(ctx, (uint8_t *)read_buffer, (size_t)read_len);
+        }
     }
 
     esp_http_client_cleanup(client);
-    ESP_LOGI(TAG, "Finished playing TTS audio stream.");
+    wit_tts_end(on_wit_tts_cb, ctx);
+    ESP_LOGI(TAG, "Finished fetching TTS audio stream.");
 }
