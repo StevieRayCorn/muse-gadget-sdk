@@ -144,7 +144,7 @@ static_assert(MP3_BUF > MP3_POLL_ROOM + MP3_HOLD, "reads would stall with the MP
 #define TEXT_REPLY_TIMEOUT_US (5 * 60 * 1000000LL)   /* typed turns: agents can work a while */
 #define TEXT_TURN_CAP_US (15 * 60 * 1000000LL)
 #define TEXT_BUSY_HOLD_US (5 * 60 * 1000000LL)
-#define DETACH_US (20 * 1000000LL)         /* acked, Muse working, no reply yet: say so, and free the device */
+#define DETACH_US (60 * 1000000LL)         /* acked, Muse working, no reply yet: say so, and free the device */
 #define PENDING_US (30 * 60 * 1000000LL)   /* how long a detached request's reply is waited for */
 #define PENDING_IDLE_US (10 * 1000000LL)   /* ... once Muse no longer says it's working */
 /*

@@ -503,7 +503,7 @@ static void settle() {
     clock_us += BUSY_HOLD_US + 1;
     check_turn();
 }
-/* A spoken turn Muse acked and is still working on, 21 s on: it says so and lets go. */
+/* A spoken turn Muse acked and is still working on, 61 s on: it says so and lets go. */
 static void detach() {
     pending_clear();
     begin();
@@ -534,7 +534,9 @@ static void detach_notice_keeps_the_review() {
 #endif
 static void detaches_only_while_muse_works() {
     begin();   /* Muse doesn't say it's working: the turn waits, then fails as before */
-    clock_us += DETACH_US + 1;
+    /* DETACH_US == REPLY_TIMEOUT_US, so there is no window past the detach point
+       before the timeout: advance to just short of the timeout instead. */
+    clock_us += REPLY_TIMEOUT_US - 1;
     check_turn();
     assert(!s_turn.detached && !s_turn.nmsgs && s_turn.phase == P_WAIT_REPLY);
     clock_us = s_turn.chat_us + REPLY_TIMEOUT_US + 1;

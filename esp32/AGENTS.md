@@ -689,7 +689,7 @@ Keep within the session's bounds:
 
 On a board with the full UI and Muse's own voice session (PSRAM), a voice-note
 turn whose request Muse took and still says it's working on (`agent.status` /
-`task.status`) after 20 s adds a notice to the turn ("Muse is working on it.
+`task.status`) after 60 s adds a notice to the turn ("Muse is working on it.
 I'll tell you when it's done."), lets go of the turn so you can ask something
 else, and remembers the request. If Muse isn't working on it, the turn waits
 and fails with NO REPLY FROM MUSE as before. Turns on the Voice PE and
