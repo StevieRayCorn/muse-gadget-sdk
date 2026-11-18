@@ -17,7 +17,11 @@ static void wit_tts_end(wit_tts_cb on_wit_tts_cb, void *ctx)
     }
 }
 
-void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
+/* Fetches one piece of text and passes its MP3 to the callback as it arrives.
+ * Returns true when the whole stream arrived cleanly, false when the request
+ * failed part-way. Does NOT signal the end of the stream: the caller does
+ * that once, after the last piece, so sentences can share one message. */
+bool play_wit_tts_audio_part(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
 {
     char url[128];
     snprintf(url, sizeof(url), "https://api.wit.ai/synthesize?v=20240304");
@@ -65,8 +69,7 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
     {
         ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
-        wit_tts_end(on_wit_tts_cb, ctx);
-        return;
+        return false;
     }
 
     // 2. CRITICAL: Actually write the POST body data to the socket!
@@ -75,17 +78,24 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
     {
         ESP_LOGE(TAG, "Failed to write POST data");
         esp_http_client_cleanup(client);
-        wit_tts_end(on_wit_tts_cb, ctx);
-        return;
+        return false;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
     int status_code = esp_http_client_get_status_code(client);
     ESP_LOGI(TAG, "Wit.ai HTTP Status: %d, Content Length: %i", status_code, content_length);
+    if (status_code < 200 || status_code >= 300)
+    {
+        /* An error body is JSON, not MP3: don't feed it to the decoder. */
+        ESP_LOGE(TAG, "Wit.ai request failed: HTTP %d", status_code);
+        esp_http_client_cleanup(client);
+        return false;
+    }
 
     // Buffer to read incoming audio stream chunks
     int read_len;
     char read_buffer[512];
+    bool ok = true;
     // size_t bytes_written = 0;
 
     while (1)
@@ -94,6 +104,7 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
         if (read_len < 0)
         {
             ESP_LOGE(TAG, "Read failed from HTTP stream");
+            ok = false;
             break;
         }
         if (read_len == 0)
@@ -108,6 +119,17 @@ void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
     }
 
     esp_http_client_cleanup(client);
+    if (ok)
+    {
+        ESP_LOGI(TAG, "Finished fetching TTS audio stream.");
+    }
+    return ok;
+}
+
+/* One fetch is the whole message: signal the end exactly once, on success
+ * and on failure alike, so the caller finishes the message either way. */
+void play_wit_tts_audio(char *agent_text, wit_tts_cb on_wit_tts_cb, void *ctx)
+{
+    play_wit_tts_audio_part(agent_text, on_wit_tts_cb, ctx);
     wit_tts_end(on_wit_tts_cb, ctx);
-    ESP_LOGI(TAG, "Finished fetching TTS audio stream.");
 }
